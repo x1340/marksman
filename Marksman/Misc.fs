@@ -169,7 +169,8 @@ let isPotentiallyMarkdownFile (configuredExts: seq<string>) (path: string) : boo
 
 let isPotentiallyInternalRef (configuredExts: seq<string>) (name: string) : bool =
     if Uri.IsWellFormedUriString(name, UriKind.Absolute) then
-        false
+        // Only file:// scheme is considered internal for absolute URIs
+        name.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
     else
         isPotentiallyMarkdownFile configuredExts name
 
