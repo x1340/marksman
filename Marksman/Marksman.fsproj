@@ -14,7 +14,7 @@
         <PropertyGroup>
             <VersionSuffix>$(VersionString)</VersionSuffix>
             <VersionSuffix Condition="$(VersionString.StartsWith('0'))">r$(VersionString)</VersionSuffix>
-            <Version>$(VersionSuffix)</Version>
+            <Version>$(VersionPrefix)-$(VersionSuffix)</Version>
         </PropertyGroup>
     </Target>
     <ItemGroup>
