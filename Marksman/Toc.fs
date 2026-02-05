@@ -50,8 +50,11 @@ module TableOfContents =
 
     let logger = LogProvider.getLoggerByName "TocAgent"
 
-    let mk (index: Marksman.Index.Index) : TableOfContents option =
-        let headings = index.headings |> Array.map (fun x -> x.data)
+    let mk (includeLevels: array<int>) (index: Marksman.Index.Index) : option<TableOfContents> =
+        let headings =
+            index.headings
+            |> Array.map (fun x -> x.data)
+            |> Array.filter (fun h -> Array.contains h.level includeLevels)
 
         if Array.isEmpty index.headings then
             None
