@@ -1,12 +1,16 @@
 module Marksman.Diag
 
+open System
+open System.IO
 open Ionide.LanguageServerProtocol.Types
 
 open Marksman.Misc
 open Marksman.Names
+open Marksman.Paths
 open Marksman.Doc
 open Marksman.Folder
 open Marksman.Workspace
+open Marksman.Syms
 
 module Lsp = Ionide.LanguageServerProtocol.Types
 
@@ -47,6 +51,58 @@ let checkNonBreakingWhitespace (doc: Doc) =
 
             [ NonBreakableWhitespace(whitespaceRange) ])
 
+// Check if a link target exists on file system (for non-markdown files/directories)
+let tryResolveNonMarkdownPath (folder: Folder) (doc: Doc) (linkPath: string) : bool =
+    try
+        let decodedPath = linkPath.UrlDecode()
+
+        // Handle file:// URIs
+        let pathStr =
+            if decodedPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase) then
+                Uri(decodedPath).LocalPath
+            else
+                decodedPath
+
+        // Resolve path
+        let absPath =
+            if pathStr.StartsWith('/') || pathStr.StartsWith('\\') then
+                // Check if it's already an absolute system path
+                if Path.IsPathRooted(pathStr) then
+                    // Use as is
+                    pathStr
+                else
+                    // Combine with current file path.
+                    let currentPath = (Folder.id folder).data |> RootPath.toSystem
+                    Path.Combine(currentPath, pathStr.TrimStart('/', '\\'))
+            else
+                // Relative from document directory
+                let docDir = Doc.path doc |> AbsPath.toSystem |> Path.GetDirectoryName
+                Path.Combine(docDir, pathStr)
+
+        let normalizedPath = Path.GetFullPath(absPath)
+
+        // Check existence
+        File.Exists(normalizedPath) || Directory.Exists(normalizedPath)
+    with
+    | _ -> false
+
+// Check if a path is an external URL (consider file:// as internal URL)
+let isExternalUrl (path: string) : bool =
+    Uri.IsWellFormedUriString(path, UriKind.Absolute) &&
+    not (path.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+
+// Check a non-markdown target and return diagnostic if it doesn't exist
+let checkNonMarkdownTarget (folder: Folder) (doc: Doc) (linkEl: Element) (targetPath: string) (refOpt: option<Ref>) : list<Entry> =
+    if tryResolveNonMarkdownPath folder doc targetPath then
+        [] // Exists, no diagnostic
+    else
+        // Missing - create diagnostic
+        let refToUse =
+            match refOpt with
+            | Some r -> r
+            | None -> Ref.CrossRef(CrossRef.CrossDoc targetPath)
+        [ BrokenLink(linkEl, refToUse) ]
+
 let checkLink (folder: Folder) (doc: Doc) (linkEl: Element) : seq<Entry> =
     let exts = Folder.configuredMarkdownExts folder
 
@@ -56,7 +112,21 @@ let checkLink (folder: Folder) (doc: Doc) (linkEl: Element) : seq<Entry> =
         |> Option.bind Syms.Sym.asRef
 
     match ref with
-    | None -> []
+    | None ->
+        match linkEl with
+        | ML { data = MdLink.IL(_, url, _) } ->
+            match url with
+            | Some { data = url } ->
+                let decodedUrl = UrlEncoded.decode url
+                if isExternalUrl decodedUrl then
+                    [] // External URL - no diagnostic
+                else if Misc.isPotentiallyInternalRef exts decodedUrl then
+                    [] // Markdown file - already handled by symbol system
+                else
+                    // Non-markdown file/directory - check existence
+                    checkNonMarkdownTarget folder doc linkEl decodedUrl None
+            | None -> []
+        | _ -> []
     | Some ref ->
         let refs = Dest.tryResolveElement folder doc linkEl |> Array.ofSeq
 
@@ -72,13 +142,24 @@ let checkLink (folder: Folder) (doc: Doc) (linkEl: Element) : seq<Entry> =
             | ML { data = MdLink.IL(_, url, _) } ->
                 match url with
                 | Some { data = url } ->
-                    // Inline links to docs that don't look like a markdown file should not
-                    // produce diagnostics
-                    if Misc.isMarkdownFile exts (UrlEncoded.decode url) then
-                        [ BrokenLink(linkEl, ref) ]
+                    let decodedUrl = UrlEncoded.decode url
+                    if Misc.isMarkdownFile exts decodedUrl then
+                        [ BrokenLink(linkEl, ref) ] // markdown
                     else
-                        []
-                | _ -> [ BrokenLink(linkEl, ref) ]
+                        checkNonMarkdownTarget folder doc linkEl decodedUrl (Some ref)
+                | _ -> [ BrokenLink(linkEl, ref) ] // non-markdown
+            | WL { data = wl } ->
+                match wl.doc with
+                | Some docNode ->
+                    let docPath = WikiEncoded.decode docNode.data
+                    if isExternalUrl docPath then
+                        [] // External URL - no diagnostic
+                    else if Misc.isMarkdownFile exts docPath then
+                        [ BrokenLink(linkEl, ref) ] // markdown - diagnostic
+                    else
+                        // Non-markdown file/directory - check existence
+                        checkNonMarkdownTarget folder doc linkEl docPath (Some ref)
+                | None -> [ BrokenLink(linkEl, ref) ]
             | _ -> [ BrokenLink(linkEl, ref) ]
         else
             [ AmbiguousLink(linkEl, ref, refs) ]
